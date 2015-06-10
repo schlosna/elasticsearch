@@ -38,7 +38,8 @@ public interface CircuitBreaker {
     public static enum Name {
         PARENT(0),
         FIELDDATA(1),
-        REQUEST(2);
+        REQUEST(2), 
+        FIXEDBITSET(3);
 
         private int ordinal;
 
@@ -59,6 +60,8 @@ public interface CircuitBreaker {
                     return Name.FIELDDATA;
                 case 2:
                     return Name.REQUEST;
+                case 3:
+                    return Name.FIXEDBITSET;
                 default:
                     throw new ElasticsearchIllegalArgumentException("No CircuitBreaker with ordinal: " + value);
             }

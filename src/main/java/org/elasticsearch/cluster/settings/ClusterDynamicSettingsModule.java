@@ -98,6 +98,9 @@ public class ClusterDynamicSettingsModule extends AbstractModule {
         clusterDynamicSettings.addDynamicSetting(HierarchyCircuitBreakerService.FIELDDATA_CIRCUIT_BREAKER_OVERHEAD_SETTING, Validator.NON_NEGATIVE_DOUBLE);
         clusterDynamicSettings.addDynamicSetting(HierarchyCircuitBreakerService.REQUEST_CIRCUIT_BREAKER_LIMIT_SETTING, Validator.MEMORY_SIZE);
         clusterDynamicSettings.addDynamicSetting(HierarchyCircuitBreakerService.REQUEST_CIRCUIT_BREAKER_OVERHEAD_SETTING, Validator.NON_NEGATIVE_DOUBLE);
+        clusterDynamicSettings.addDynamicSetting(HierarchyCircuitBreakerService.FIXEDBITSET_CIRCUIT_BREAKER_LIMIT_SETTING, Validator.MEMORY_SIZE);
+        clusterDynamicSettings.addDynamicSetting(HierarchyCircuitBreakerService.FIXEDBITSET_CIRCUIT_BREAKER_OVERHEAD_SETTING, Validator.NON_NEGATIVE_DOUBLE);
+        
         clusterDynamicSettings.addDynamicSetting(GroovyScriptEngineService.GROOVY_SCRIPT_BLACKLIST_PATCH);
     }
 

@@ -63,11 +63,18 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
     public static final String REQUEST_CIRCUIT_BREAKER_TYPE_SETTING = "indices.breaker.request.type";
     public static final String DEFAULT_REQUEST_BREAKER_LIMIT = "40%";
 
+    public static final String FIXEDBITSET_CIRCUIT_BREAKER_LIMIT_SETTING = "indices.breaker.fixedbitset.limit";
+    public static final String FIXEDBITSET_CIRCUIT_BREAKER_OVERHEAD_SETTING = "indices.breaker.fixedbitset.overhead";
+    public static final String FIXEDBITSET_CIRCUIT_BREAKER_TYPE_SETTING = "indices.breaker.fixedbitset.type";
+    public static final String DEFAULT_FIXEDBITSET_BREAKER_LIMIT = "60%";
+
     public static final String DEFAULT_BREAKER_TYPE = "memory";
+
 
     private volatile BreakerSettings parentSettings;
     private volatile BreakerSettings fielddataSettings;
     private volatile BreakerSettings requestSettings;
+    private volatile BreakerSettings fixedbitsetSettings;
 
     // Tripped count for when redistribution was attempted but wasn't successful
     private final AtomicLong parentTripCount = new AtomicLong(0);
@@ -105,9 +112,15 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
                 settings.getAsDouble(REQUEST_CIRCUIT_BREAKER_OVERHEAD_SETTING, 1.0),
                 CircuitBreaker.Type.parseValue(settings.get(REQUEST_CIRCUIT_BREAKER_TYPE_SETTING, DEFAULT_BREAKER_TYPE))
         );
+        
+        this.fixedbitsetSettings = new BreakerSettings(CircuitBreaker.Name.FIXEDBITSET,
+                settings.getAsMemory(FIXEDBITSET_CIRCUIT_BREAKER_LIMIT_SETTING, DEFAULT_FIXEDBITSET_BREAKER_LIMIT).bytes(),
+                settings.getAsDouble(FIXEDBITSET_CIRCUIT_BREAKER_OVERHEAD_SETTING, 1.0),
+                CircuitBreaker.Type.parseValue(settings.get(FIXEDBITSET_CIRCUIT_BREAKER_TYPE_SETTING, DEFAULT_BREAKER_TYPE))
+        );
 
         // Validate the configured settings
-        validateSettings(new BreakerSettings[] {this.requestSettings, this.fielddataSettings});
+        validateSettings(new BreakerSettings[] {this.requestSettings, this.fielddataSettings, this.fixedbitsetSettings});
 
         this.parentSettings = new BreakerSettings(CircuitBreaker.Name.PARENT,
                 settings.getAsMemory(TOTAL_CIRCUIT_BREAKER_LIMIT_SETTING, DEFAULT_TOTAL_CIRCUIT_BREAKER_LIMIT).bytes(), 1.0, CircuitBreaker.Type.PARENT);
@@ -131,8 +144,16 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
             requestBreaker = new ChildMemoryCircuitBreaker(requestSettings, logger, this, CircuitBreaker.Name.REQUEST);
         }
 
+        CircuitBreaker fixedbitsetBreaker;
+        if (requestSettings.getType() == CircuitBreaker.Type.NOOP) {
+            fixedbitsetBreaker = new NoopCircuitBreaker(CircuitBreaker.Name.FIXEDBITSET);
+        } else {
+            fixedbitsetBreaker = new ChildMemoryCircuitBreaker(fixedbitsetSettings, logger, this, CircuitBreaker.Name.FIXEDBITSET);
+        }
+
         tempBreakers.put(CircuitBreaker.Name.FIELDDATA, fielddataBreaker);
         tempBreakers.put(CircuitBreaker.Name.REQUEST, requestBreaker);
+        tempBreakers.put(CircuitBreaker.Name.FIXEDBITSET, fixedbitsetBreaker);
         this.breakers = ImmutableMap.copyOf(tempBreakers);
 
         nodeSettingsService.addListener(new ApplySettings());
@@ -170,6 +191,19 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
                         HierarchyCircuitBreakerService.this.requestSettings.getType());
             }
 
+            // FixedBitSet settings
+            BreakerSettings newFixedbitsetSettings = HierarchyCircuitBreakerService.this.fixedbitsetSettings;
+            ByteSizeValue newFixedbitsetMax = settings.getAsMemory(FIXEDBITSET_CIRCUIT_BREAKER_LIMIT_SETTING, null);
+            Double newFixedbitsetOverhead = settings.getAsDouble(FIXEDBITSET_CIRCUIT_BREAKER_OVERHEAD_SETTING, null);
+            if (newFixedbitsetMax != null || newFixedbitsetOverhead != null) {
+                changed = true;
+                long newFixedbitsetLimitBytes = newFixedbitsetMax == null ? HierarchyCircuitBreakerService.this.fixedbitsetSettings.getLimit() : newFixedbitsetMax.bytes();
+                newFixedbitsetOverhead = newFixedbitsetOverhead == null ? HierarchyCircuitBreakerService.this.fixedbitsetSettings.getOverhead() : newFixedbitsetOverhead;
+
+                newFixedbitsetSettings = new BreakerSettings(CircuitBreaker.Name.FIXEDBITSET, newFixedbitsetLimitBytes, newFixedbitsetOverhead,
+                        HierarchyCircuitBreakerService.this.fixedbitsetSettings.getType());
+            }
+
             // Parent settings
             BreakerSettings newParentSettings = HierarchyCircuitBreakerService.this.parentSettings;
             long oldParentMax = HierarchyCircuitBreakerService.this.parentSettings.getLimit();
@@ -181,11 +215,13 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
 
             if (changed) {
                 // change all the things
-                validateSettings(new BreakerSettings[]{newFielddataSettings, newRequestSettings});
-                logger.info("Updating settings parent: {}, fielddata: {}, request: {}", newParentSettings, newFielddataSettings, newRequestSettings);
+                validateSettings(new BreakerSettings[]{newFielddataSettings, newRequestSettings, newFixedbitsetSettings});
+                logger.info("Updating settings parent: {}, fielddata: {}, request: {}, fixedbitset: {}", 
+                        newParentSettings, newFielddataSettings, newRequestSettings, newFixedbitsetSettings);
                 HierarchyCircuitBreakerService.this.parentSettings = newParentSettings;
                 HierarchyCircuitBreakerService.this.fielddataSettings = newFielddataSettings;
                 HierarchyCircuitBreakerService.this.requestSettings = newRequestSettings;
+                HierarchyCircuitBreakerService.this.fixedbitsetSettings = newFixedbitsetSettings;
 
                 Map<CircuitBreaker.Name, CircuitBreaker> tempBreakers = new HashMap<>();
                 CircuitBreaker fielddataBreaker;
@@ -202,12 +238,22 @@ public class HierarchyCircuitBreakerService extends CircuitBreakerService {
                     requestBreaker = new NoopCircuitBreaker(CircuitBreaker.Name.REQUEST);
                 } else {
                     requestBreaker = new ChildMemoryCircuitBreaker(newRequestSettings,
-                            (ChildMemoryCircuitBreaker)HierarchyCircuitBreakerService.this.breakers.get(CircuitBreaker.Name.REQUEST),
+                            (ChildMemoryCircuitBreaker) HierarchyCircuitBreakerService.this.breakers.get(CircuitBreaker.Name.REQUEST),
                             logger, HierarchyCircuitBreakerService.this, CircuitBreaker.Name.REQUEST);
+                }
+
+                CircuitBreaker fixedbitsetBreaker;
+                if (newFixedbitsetSettings.getType() == CircuitBreaker.Type.NOOP) {
+                    fixedbitsetBreaker = new NoopCircuitBreaker(CircuitBreaker.Name.FIXEDBITSET);
+                } else {
+                    fixedbitsetBreaker = new ChildMemoryCircuitBreaker(newFixedbitsetSettings,
+                            (ChildMemoryCircuitBreaker) HierarchyCircuitBreakerService.this.breakers.get(CircuitBreaker.Name.FIXEDBITSET),
+                            logger, HierarchyCircuitBreakerService.this, CircuitBreaker.Name.FIXEDBITSET);
                 }
 
                 tempBreakers.put(CircuitBreaker.Name.FIELDDATA, fielddataBreaker);
                 tempBreakers.put(CircuitBreaker.Name.REQUEST, requestBreaker);
+                tempBreakers.put(CircuitBreaker.Name.FIXEDBITSET, fixedbitsetBreaker);
                 HierarchyCircuitBreakerService.this.breakers = ImmutableMap.copyOf(tempBreakers);
             }
         }
